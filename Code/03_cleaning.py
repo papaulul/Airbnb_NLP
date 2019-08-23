@@ -1,4 +1,3 @@
-#%%
 import re 
 import json 
 import pickle
@@ -9,88 +8,145 @@ import seaborn as sns
 import math
 import os
 import time
-start_time = time.time()
+from nltk.tokenize import TreebankWordTokenizer
 import spacy
 import nltk 
 from collections import Counter
-# Makes sure we're the correct directory
+from sklearn.feature_extraction.text import TfidfVectorizer
+import multiprocessing
+from multiprocessing import Pool
+import scipy.sparse as sp
+from nltk.util import ngrams
+from joblib import Parallel, delayed
 
-AWS = True
-if AWS: 
+def readin(AWS):
+    # Makes sure we're the correct directory
+    if AWS: 
+        aws_add = "" 
+    else:
+        aws_add = "_sample"
+        os.chdir('/Users/pkim/Dropbox/Projects/Airbnb_NLP')
     file_path = "data/"
-else: 
-    os.chdir('/Users/pkim/Dropbox/Projects/Airbnb_NLP')
-    file_path = "data/"
 
-LA_reviews = pd.read_csv(file_path+"reviews_LA_7_8.csv")
-SF_reviews = pd.read_csv(file_path+"reviews_SF_7_8.csv")
-LA_hosting = pd.read_csv(file_path+"LA_nlp_ds.csv")
-SF_hosting = pd.read_csv(file_path+"SF_nlp_ds.csv")
-
-#%%
+    LA_reviews = pd.read_csv(file_path+"LA_review"+aws_add+".csv")
+    SF_reviews = pd.read_csv(file_path+"SF_review"+aws_add+".csv")
+    LA_hosting = pd.read_csv(file_path+"LA_nlp_ds.csv")
+    SF_hosting = pd.read_csv(file_path+"SF_nlp_ds.csv")
+    return [LA_reviews,SF_reviews,LA_hosting,SF_hosting]
 """
-sns.heatmap(LA_reviews.isna())
-sns.heatmap(SF_reviews.isna())
-sns.heatmap(LA_hosting.isna())
-sns.heatmap(SF_hosting.isna())
+def heatmaps():
+    sns.heatmap(LA_reviews.isna())
+    sns.heatmap(SF_reviews.isna())
+    sns.heatmap(LA_hosting.isna())
+    sns.heatmap(SF_hosting.isna())
 """
-#%% 
-tables = [LA_reviews,SF_reviews,LA_hosting,SF_hosting]
-to_zip =  ["LA_reviews","SF_reviews","LA_hosting","SF_hosting"]
 
-for table,table_name in zip(tables, to_zip): 
-    tab_len = len(table)
-    print(table_name,"\n")
-    for columns in table.columns:
-        missing_per = sum(table[columns].isna())/tab_len
-        print(columns,": ", round(missing_per*100,4),"%")
-    print("*"*64)
-#%%
-for table in tables:
-    for columns in table.columns:
-        missing_per = sum(table[columns].isna())/tab_len
-        if missing_per > 0:
-            table[columns+"_missing"] = table[columns].isna()
-            table[columns] = table[columns].fillna("")
-#%%
-columns = ['name','summary','space','description','neighborhood_overview',
-          'notes','transit','access','interaction','house_rules',
-           'host_about']
+def cleaning(tables, to_zip):
+    tables = tables
+    for table,table_name in zip(tables, to_zip): 
+        tab_len = len(table)
+        print(table_name,"\n")
+        for columns in table.select_dtypes("object").columns:
+            missing_per = sum(table[columns].isna())/tab_len
+            print(columns,": ", round(missing_per*100,4),"%")
+            if missing_per > 0:
+                table[columns+"_missing"] = table[columns].isna()
+                table[columns] = table[columns].fillna("")
+            table[columns] = table[columns].apply(lambda x: re.sub('[^A-Za-z0-9]+',' ',str(x)))
+        print("*"*64)
+    return tables
 
-for col in columns: 
-    LA_hosting[col] = LA_hosting[col].apply(lambda x: 
-                                re.sub('[^A-Za-z0-9]+',' ',str(x))
-                               )
-    SF_hosting[col] = SF_hosting[col].apply(lambda x: 
-                                re.sub('[^A-Za-z0-9]+',' ',str(x))
-                               )
-LA_hosting.head()
+def multi_tokenize(doc):
+    x = Parallel(n_jobs=num_partitions)(delayed(tokenize)(line) for line in doc)
+    return x
 
-#%%
-nlp = spacy.load("en")
-prefix_re = nlp.Defaults.prefixes
-suffix_re = nlp.Defaults.suffixes
+def tokenize(doc):
+    tokenizer = TreebankWordTokenizer()
+    token = tokenizer.tokenize(doc)
+    token = grams(token)
+    return token 
 
-tokenizer = spacy.tokenizer.Tokenizer(nlp.vocab,prefix_search=prefix_re,
-                                     suffix_search = suffix_re)
+def grams(token):
+    two_gram = [" ".join(x) for x in list(ngrams(token,2))]
+    three_gram = [" ".join(x) for x in list(ngrams(token,3))]
+    return token+two_gram + three_gram
 
-#%%
-for table in tables:
-    for columns in table.select_dtypes("object").columns:
-        table[columns+"_tokenized"] = table[columns].apply(lambda col: col.lower()).apply(nlp)\
-            .apply(lambda toke: [token for token in toke if not token.is_stop])
-        table[columns+"_pos"] = table[columns+"_tokenized"].apply(lambda token: [toke.pos_ for toke in token])
-        table[columns+"_noun_count"] = table[columns+"_pos"]\
-            .apply(lambda pos: sum([1 for part in pos if part =="NOUN"]))
-        table[columns+"_proper_noun_count"] = table[columns+"_pos"]\
-            .apply(lambda pos: sum([1 for part in pos if part =="PROPN"]))
-        table[columns+"_adj_adv_count"] = table[columns+"_pos"]\
-            .apply(lambda pos: sum([1 for part in pos if part in ["ADV","ADJ"]]))
-        table[columns+"_verb_count"] = table[columns+"_pos"]\
-            .apply(lambda pos: sum([1 for part in pos if part =="VERB"]))
-        print(columns, " DONE")
-#%%
+def dummy_token(text):
+    return text 
+
+def fit_model(data, column, table_name):
+    tfidf_vectorizer = TfidfVectorizer(stop_words=nltk.corpus.stopwords.words('english'),
+     tokenizer= dummy_token, lowercase=False)
+    tfidf = tfidf_vectorizer.fit(data)
+    pickle.dump(tfidf, open("data/"+table_name+"_"+column+".pkl","wb"))
+    return tfidf
+
+def parallelize_dataframe(df, func):
+    a = np.array_split(df, num_partitions)
+    del df
+    pool = Pool(num_cores)
+    #df = pd.concat(pool.map(func, [a,b,c,d,e]))
+    df = sp.vstack(pool.map(func, a), format='csr')
+    pool.close()
+    pool.join()
+    return df
+
+def test_func(data):
+    #print("Process working on: ",data)
+    tfidf_matrix = tfidf_vectorizer.transform(data )
+    #return pd.DataFrame(tfidf_matrix.toarray())
+    return tfidf_matrix
 
 
-for table, table_name in zip(tables, to_zip):   
-    table.to_csv(table_name+".csv",index=False)
+def output(tables, to_zip):
+    for table, table_name in zip(tables, to_zip):   
+        table.to_csv("data/"+table_name+".csv",index=False)
+
+
+if __name__ == "__main__":
+    start_time = time.time()
+    try:
+        nltk.download('punkt')
+        nltk.download('averaged_perceptron_tagger')
+        nltk.download('stopwords')
+    except:
+        print("Can't download files")
+    tables = readin(True)
+    for table in tables: 
+        try: 
+            table['date'] = pd.to_datetime(table['date'])
+        except:
+            pass 
+    to_zip =  ["LA_reviews","SF_reviews","LA_hosting","SF_hosting"]
+    tables = cleaning(tables, to_zip)
+
+
+    num_cores = multiprocessing.cpu_count()
+    num_partitions = num_cores-1 # I like to leave some cores for other
+    print(num_partitions)
+    for table,table_name in zip(tables,to_zip):
+        for column in table.select_dtypes("object").columns:
+            if "name" not in column:
+                print(column,",",table_name)
+                token_time = time.time()
+                
+                table[column+"_token"] = multi_tokenize(table[column].values)
+                
+                print("Took: %.3f seconds for tokenization" % (time.time() - token_time))
+
+                fit_time = time.time()
+                
+                tfidf_vectorizer = fit_model(table[column+"_token"], column, table_name)
+                
+                print("Took: %.3f seconds for fitting model" % (time.time() - fit_time))
+
+                transform_time = time.time()
+
+                table[column+"_token"] = parallelize_dataframe(table[column+"_token"], test_func)
+                
+                print("Took: %.3f seconds for transform model\n" % (time.time() - transform_time))
+
+
+    print("Took: %.3f seconds total" % (time.time() - start_time))
+
+    output(tables, to_zip)
