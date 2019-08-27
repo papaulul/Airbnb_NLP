@@ -19,20 +19,27 @@ import scipy.sparse as sp
 from nltk.util import ngrams
 from joblib import Parallel, delayed
 
+
 def readin(AWS):
-    # Makes sure we're the correct directory
+    """
+    AWS is a boolean whether or not I'm using an EC2 instance  
+    returns a list of all the datasets 
+    """
     if AWS: 
+        # If AWS is true, then we will look over the full dataset
         aws_add = "" 
     else:
+        # If it's local, then we look over just the sample set
         aws_add = "_sample"
         os.chdir('/Users/pkim/Dropbox/Projects/Airbnb_NLP')
     file_path = "data/"
-
+    # Reading in all of the files
     LA_reviews = pd.read_csv(file_path+"LA_review"+aws_add+".csv")
     SF_reviews = pd.read_csv(file_path+"SF_review"+aws_add+".csv")
     LA_hosting = pd.read_csv(file_path+"LA_nlp_ds.csv")
     SF_hosting = pd.read_csv(file_path+"SF_nlp_ds.csv")
-    return [LA_reviews,SF_reviews,LA_hosting,SF_hosting]
+    return [LA_reviews,LA_hosting],[SF_reviews,SF_hosting]
+
 """
 def heatmaps():
     sns.heatmap(LA_reviews.isna())
@@ -42,7 +49,9 @@ def heatmaps():
 """
 
 def cleaning(tables, to_zip):
-    tables = tables
+    """
+    Cleaning tables for 
+    """
     for table,table_name in zip(tables, to_zip): 
         tab_len = len(table)
         print(table_name,"\n")
@@ -63,20 +72,20 @@ def multi_tokenize(doc):
 def tokenize(doc):
     tokenizer = TreebankWordTokenizer()
     token = tokenizer.tokenize(doc)
-    token = grams(token)
+    #token = grams(token)
     return token 
 
 def grams(token):
     two_gram = [" ".join(x) for x in list(ngrams(token,2))]
-    three_gram = [" ".join(x) for x in list(ngrams(token,3))]
-    return token+two_gram + three_gram
+    #three_gram = [" ".join(x) for x in list(ngrams(token,3))]
+    return token+two_gram #+ three_gram
 
 def dummy_token(text):
     return text 
 
 def fit_model(data, column, table_name):
     tfidf_vectorizer = TfidfVectorizer(stop_words=nltk.corpus.stopwords.words('english'),
-     tokenizer= dummy_token, lowercase=False)
+    tokenizer= dummy_token, lowercase=False, min_df=.1, max_df=.8,max_features=300)
     tfidf = tfidf_vectorizer.fit(data)
     pickle.dump(tfidf, open("data/"+table_name+"_"+column+".pkl","wb"))
     return tfidf
@@ -93,50 +102,52 @@ def parallelize_dataframe(df, func):
 
 def test_func(data):
     #print("Process working on: ",data)
-    tfidf_matrix = tfidf_vectorizer.transform(data )
+    tfidf_matrix = tfidf_vectorizer.transform(data)
     #return pd.DataFrame(tfidf_matrix.toarray())
     return tfidf_matrix
 
 
-def output(tables, to_zip):
-    for table, table_name in zip(tables, to_zip):   
-        table.to_csv("data/"+table_name+".csv",index=False)
-
-
 if __name__ == "__main__":
+    # Timing the program 
     start_time = time.time()
+    # All of the nltk files needed
     try:
         nltk.download('punkt')
         nltk.download('averaged_perceptron_tagger')
         nltk.download('stopwords')
     except:
         print("Can't download files")
-    tables = readin(True)
-    for table in tables: 
+    # initiate readin
+    train,test = readin(True)
+    # Changing date to date time
+    for table in train+test: 
         try: 
             table['date'] = pd.to_datetime(table['date'])
         except:
             pass 
-    to_zip =  ["LA_reviews","SF_reviews","LA_hosting","SF_hosting"]
-    tables = cleaning(tables, to_zip)
+    # Name of all of the dataframes
+    to_zip_train =  ["LA_reviews","LA_hosting"]
+    to_zip_test = ["SF_reviews","SF_hosting"]
+    # 
+    train = cleaning(train, to_zip_train)
+    test = cleaning(test,to_zip_test)
 
 
     num_cores = multiprocessing.cpu_count()
     num_partitions = num_cores-1 # I like to leave some cores for other
     print(num_partitions)
-    for table,table_name in zip(tables,to_zip):
+    for table,table_name in zip(train,to_zip_train):
         for column in table.select_dtypes("object").columns:
             if "name" not in column:
                 print(column,",",table_name)
                 token_time = time.time()
                 
                 table[column+"_token"] = multi_tokenize(table[column].values)
-                
                 print("Took: %.3f seconds for tokenization" % (time.time() - token_time))
-
                 fit_time = time.time()
                 
                 tfidf_vectorizer = fit_model(table[column+"_token"], column, table_name)
+                #tfidf_vectorizer = fit_model(table[column], column, table_name)
                 
                 print("Took: %.3f seconds for fitting model" % (time.time() - fit_time))
 
@@ -145,8 +156,10 @@ if __name__ == "__main__":
                 table[column+"_token"] = parallelize_dataframe(table[column+"_token"], test_func)
                 
                 print("Took: %.3f seconds for transform model\n" % (time.time() - transform_time))
-
+                
+        pickle.dump(table, open("data/"+table_name+".pkl", "wb"))
+    
+    for table,table_name in zip(test,to_zip_test):
+        pickle.dump(table, open("data/"+table_name+".pkl", "wb"))
 
     print("Took: %.3f seconds total" % (time.time() - start_time))
-
-    output(tables, to_zip)
